@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://d3js.org/topojson.v3.min.js"></script>
+    <link rel="stylesheet" href="style.css" />
+    <title>USA Unemployment</title>
+  </head>
+
+  <body>
+    <nav>
+      <h1 class="nav-title">USA Unemployment (2000. - 2022.)</h1>
+      <h3>
+        Select Year: <span> <select id="year-select"></select></span>
+      </h3>
+    </nav>
+
+    <div class="container">
+      <div id="map"></div>
+      <div id="detail"></div>
+      <div id="pieChart"></div>
+    </div>
+  </body>
+
+  <script>
+    // Create a tooltip div
+    var tooltip = d3
+      .select('body')
+      .append('div')
+      .attr('class', 'tooltip')
+      .style('opacity', 0);
+
+    var zoomedState = null;
+
+    Promise.all([
+      d3.json('datasets/unemployment-us-dataset.json'),
+      d3.json('datasets/us.json'),
+    ]).then(function (values) {
+      // data in variables
+      unemployment_data = values[0];
+      map_data = values[1];
+
+      // get year
+      var select = d3.select('#year-select');
+      var yearExtent = d3.extent(unemployment_data.unemployment, (d) => d.Year);
+
+      // populate select
+      for (var year = yearExtent[0]; year <= yearExtent[1]; year++) {
+        select.append('option').text(year);
+      }
+
+      // onChange on select
+      select.on('change', function () {
+        var selectedYear = this.value;
+        createMap(unemployment_data.unemployment, map_data, selectedYear);
+        createPieChart(unemployment_data.unemployment, selectedYear);
+        if (zoomedState != null) {
+          var filteredYearData = unemployment_data.unemployment.filter(
+            (d) => d.Year == selectedYear
+          );
+          var unemploymentData = filteredYearData.find(
+            (e) =>
+              e['State/Area'].toLowerCase() ===
+              zoomedState.properties.name.toLowerCase()
+          );
+          updateDetails(unemploymentData);
+        }
+      });
+
+      //first view
+      createMap(unemployment_data.unemployment, map_data, yearExtent[0]);
+      createPieChart(unemployment_data.unemployment, yearExtent[0]);
+      d3.select('#detail')
+        .append('svg')
+        .attr('id', 'details')
+        .attr('width', 480)
+        .attr('height', 210)
+        .attr('transform', function (d) {
+          return 'translate(' + 805 + ',' + -606 + ')';
+        });
+    });
+
+    function createMap(unemployment, mapData, year) {
+      d3.select('#map svg').remove();
+
+      //getting data from selected year
+      unemployment = unemployment.filter((d) => d.Year == year);
+
+      var width = 800,
+        height = 600;
+
+      var svg = d3
+        .select('#map')
+        .append('svg')
+        .attr('width', width)
+        .attr('height', height);
+
+      var projection = d3.geoAlbersUsa().translate([width / 2, height / 2]);
+
+      var path = d3.geoPath().projection(projection);
+      // Define original scale and translate parameters
+      var originalScale = projection.scale();
+      var originalTranslate = projection.translate();
+
+      var states = topojson.feature(mapData, mapData.objects.states).features;
+
+      // color
+      var colorScale = d3
+        .scaleLinear()
+        .domain(
+          d3.extent(
+            unemployment,
+            (d) => +d['Percent (%) of Labor Force Unemployed in State/Area']
+          )
+        )
+        .range([d3.rgb('#ffc9bb'), d3.rgb('#c61a09')]);
+
+      // Combine data from map with unemploymenty
+      states.forEach(function (state) {
+        var unemploymentData = unemployment.find(
+          (d) =>
+            d['State/Area'].toLowerCase() ===
+            state.properties.name.toLowerCase()
+        );
+        state.properties.unemployment = unemploymentData
+          ? +unemploymentData[
+              'Percent (%) of Labor Force Unemployed in State/Area'
+            ]
+          : 0;
+        state.properties.total = unemploymentData
+          ? +unemploymentData['Total Unemployment in State/Area']
+          : 0;
+      });
+
+      svg
+        .append('g')
+        .selectAll('path')
+        .data(states)
+        .join('path')
+        .attr('d', path)
+        .attr('stroke', 'white')
+        .attr('fill', (d) => colorScale(d.properties.unemployment))
+        .on('mouseover', function (event, d) {
+          d3.select(this)
+            .style('cursor', 'pointer')
+            .style('stroke', 'black')
+            .attr('stroke-width', '0.5px');
+        })
+        .on('mouseout', function (event, d) {
+          d3.select(this)
+            .style('stroke', 'white')
+            .attr('stroke-width', '0.5px');
+        })
+        .on('click', function (event, d) {
+          //get data for clicked state
+          var unemploymentData = unemployment.find(
+            (e) =>
+              e['State/Area'].toLowerCase() === d.properties.name.toLowerCase()
+          );
+          updateDetails(unemploymentData);
+          //zoomout funcionality
+          if (zoomedState === d) {
+            zoomedState = null;
+            svg
+              .transition()
+              .duration(750)
+              .call(zoom.transform, d3.zoomIdentity);
+          } else {
+            var bounds = path.bounds(d),
+              dx = bounds[1][0] - bounds[0][0],
+              dy = bounds[1][1] - bounds[0][1],
+              x = (bounds[0][0] + bounds[1][0]) / 2,
+              y = (bounds[0][1] + bounds[1][1]) / 2,
+              scale = Math.max(
+                1,
+                Math.min(8, 0.9 / Math.max(dx / width, dy / height))
+              ),
+              translate = [width / 2 - scale * x, height / 2 - scale * y];
+
+            // new state
+            svg
+              .transition()
+              .duration(750)
+              .call(
+                zoom.transform,
+                d3.zoomIdentity
+                  .translate(translate[0], translate[1])
+                  .scale(scale)
+              );
+
+            zoomedState = d;
+          }
+        });
+
+      // zoom
+      var zoom = d3.zoom().scaleExtent([1, 8]).on('zoom', zoomed);
+      svg.call(zoom);
+
+      function zoomed({ transform }) {
+        svg.selectAll('path').attr('transform', transform);
+      }
+    }
+
+    function updateDetails(data) {
+      d3.select('#details').remove();
+      var svg = d3
+        .select('#detail')
+        .append('svg')
+        .attr('id', 'details')
+        .attr('width', 600)
+        .attr('height', 210)
+        .attr('transform', function (d) {
+          return 'translate(' + 805 + ',' + -606 + ')';
+        });
+
+      var yPosition = 20;
+      Object.keys(data).forEach(function (key) {
+        svg
+          .append('text')
+          .attr('x', 10) // Set x position
+          .attr('y', yPosition) // Set y position, increment for each item
+          .style('fill', 'white')
+          .style('font-size', '0.9em')
+          .text(key + ': ' + data[key]); // Set text
+
+        yPosition += 20; // Increment y position for next item
+      });
+    }
+
+    function createPieChart(data, year) {
+      d3.select('#pieChart svg').remove();
+      // Define dimensions
+      var width = 600;
+      var height = 390;
+      var radius = Math.min(width, height - 80) / 2;
+
+      var svg = d3
+        .select('#pieChart')
+        .append('svg')
+        .attr('width', width)
+        .attr('height', height)
+        .attr('transform', function (d) {
+          return 'translate(' + 805 + ',' + -610 + ')';
+        })
+        .append('g')
+        .attr(
+          'transform',
+          'translate(' + width / 2 + ',' + (height / 2 + 20) + ')'
+        );
+
+      data = data.filter((d) => d.Year == year);
+
+      // Sort and slice the data
+      data.sort(
+        (a, b) =>
+          b['Total Unemployment in State/Area'] -
+          a['Total Unemployment in State/Area']
+      );
+      var topTenData = data.slice(0, 10);
+      // Create a color scale
+      var color = d3.scaleOrdinal(d3.schemeCategory10);
+
+      // Create a pie layout function
+      var pie = d3.pie().value((d) => d['Total Unemployment in State/Area']);
+
+      // Create an arc function
+      var arc = d3.arc().innerRadius(0).outerRadius(radius);
+
+      // Create the pie chart
+      var g = svg
+        .selectAll('.arc')
+        .data(pie(topTenData))
+        .enter()
+        .append('g')
+        .attr('class', 'arc');
+
+      // Append arcs
+      g.append('path')
+        .attr('d', arc)
+        .style('fill', function (d) {
+          return color(d.data['State/Area']);
+        })
+        .attr('opacity', 0.75)
+        .on('mousemove', function (event, d) {
+          d3.select(this).attr('opacity', 1);
+
+          tooltip
+            .html(
+              '<b>' +
+                d.data['State/Area'] +
+                ': </b>' +
+                d.data['Total Unemployment in State/Area']
+            )
+            .style('left', event.pageX + 'px')
+            .style('top', event.pageY + 'px')
+            .style('opacity', 1);
+        })
+        .on('mouseout', function (event, d) {
+          d3.select(this).attr('opacity', 0.75);
+
+          tooltip
+            .style('left', 0 + 'px')
+            .style('top', 0 + 'px')
+            .style('opacity', 0);
+        });
+
+      svg
+        .append('text')
+        .attr('x', 0)
+        .attr('y', -radius - 20)
+        .style('text-anchor', 'middle')
+        .style('fill', 'white')
+        .style('stroke', 'white')
+        .text('Top 10 States by Number of Unemployed Citizens in ' + year);
+
+      // Another arc that won't be drawn. Just for labels positioning
+      var outerArc = d3
+        .arc()
+        .innerRadius(radius * 0.9)
+        .outerRadius(radius * 0.9);
+
+      //append the labels
+      svg
+        .selectAll('allLabels')
+        .data(pie(topTenData))
+        .enter()
+        .append('text')
+        .attr('class', 'pie-text')
+        .style('font-size', '0.8em')
+        .style('fill', 'white')
+        .attr('transform', function (d) {
+          var pos = outerArc.centroid(d);
+          var midangle = d.startAngle + (d.endAngle - d.startAngle) / 2;
+          pos[0] = radius * 0.99 * (midangle < Math.PI ? 1 : -1);
+          return 'translate(' + pos + ')';
+        })
+        .style('text-anchor', function (d) {
+          var midangle = d.startAngle + (d.endAngle - d.startAngle) / 2;
+          return midangle < Math.PI ? 'start' : 'end';
+        })
+        .text(function (d) {
+          return d.data['State/Area'];
+        });
+
+      svg
+        .selectAll('allLabels')
+        .data(pie(topTenData))
+        .enter()
+        .append('polyline')
+        .attr('class', 'pie-polylines')
+        .attr('stroke', 'white')
+        .style('fill', 'none')
+        .attr('stroke-width', 1)
+        .attr('points', function (d) {
+          var posA = arc.centroid(d); // line insertion in the slice
+          var posB = outerArc.centroid(d); // line break: we use the other arc generator that has been built only for that
+          var posC = outerArc.centroid(d); // Label position = almost the same as posB
+          var midangle = d.startAngle + (d.endAngle - d.startAngle) / 2; // we need the angle to see if the X position will be at the extreme right or extreme left
+          posC[0] = radius * 0.9 * (midangle < Math.PI ? 1 : -1); // multiply by 1 or -1 to put it on the right or on the left
+          return [posA, posB, posC];
+        });
+    }
+  </script>
+</html>
